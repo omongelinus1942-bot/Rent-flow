@@ -500,6 +500,14 @@ const fmtDate = (d) => d ? new Date(d).toLocaleDateString("en-KE", { day: "2-dig
 const uid = (prefix) => prefix + "-" + Math.floor(1000 + Math.random() * 9000);
 const TODAY = "2026-07-14";
 const FOOTER_TEXT = "Powered by Omlin Consultancy";
+// The signed-in account's business details (Settings → Business Information), printed
+// as the top header line of every PDF/CSV download. Kept as a plain mutable object
+// (not React state) so the non-React exportPDF()/CSV helpers can read it at export time.
+let BUSINESS_INFO = { name: "", address: "", contact: "" };
+function setBusinessInfo(info) { BUSINESS_INFO = { name: "", address: "", contact: "", ...(info || {}) }; }
+function businessHeaderLine() {
+  return [BUSINESS_INFO.name, BUSINESS_INFO.address, BUSINESS_INFO.contact].filter(Boolean).join("   ·   ");
+}
 
 /* ---- Billing / arrears helpers ---- */
 // The full monthly charge for renting a unit: rent + utilities + parking.
@@ -553,7 +561,9 @@ function toCSV(rows, columns) {
     v = String(v).replace(/"/g, '""');
     return /[,"\n]/.test(v) ? `"${v}"` : v;
   }).join(",")).join("\n");
-  return header + "\n" + body + "\n\n" + FOOTER_TEXT;
+  const bizLine = businessHeaderLine();
+  const topHeader = bizLine ? bizLine + "\n\n" : "";
+  return topHeader + header + "\n" + body + "\n\n" + FOOTER_TEXT;
 }
 function downloadCSV(filename, csvString) {
   const blob = new Blob([csvString], { type: "text/csv;charset=utf-8;" });
@@ -598,6 +608,14 @@ function exportPDF({ title, subtitle, summary, columns, rows, filename, orientat
   doc.text("RentFlow · Rental Property Income & Expense Management", 30, 17);
 
   let cursorY = bandHeight + 10;
+  const bizLine = businessHeaderLine();
+  if (bizLine) {
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.setTextColor(15, 42, 67);
+    doc.text(bizLine, 14, cursorY);
+    cursorY += 6;
+  }
   doc.setFont("helvetica", "normal");
   doc.setFontSize(9.5);
   doc.setTextColor(107, 118, 132);
@@ -1668,10 +1686,18 @@ function ReceiptModal({ dark, payment, tenants, units, properties, onClose }) {
     doc.text("RentFlow", 25, 17);
 
     doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(107, 118, 132);
-    doc.text(`Receipt No: ${payment.id}`, 14, bandHeight + 8);
-    doc.text(`Issued: ${fmtDate(TODAY)}`, w - 55, bandHeight + 8);
+    let bodyStartY = bandHeight + 8;
+    const bizLine = businessHeaderLine();
+    if (bizLine) {
+      doc.setFont("helvetica", "bold"); doc.setFontSize(8.5); doc.setTextColor(15, 42, 67);
+      doc.text(bizLine, 14, bodyStartY);
+      bodyStartY += 6;
+      doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(107, 118, 132);
+    }
+    doc.text(`Receipt No: ${payment.id}`, 14, bodyStartY);
+    doc.text(`Issued: ${fmtDate(TODAY)}`, w - 55, bodyStartY);
     doc.autoTable({
-      startY: bandHeight + 12,
+      startY: bodyStartY + 4,
       body: lines.map(([k, v]) => [k, v]),
       theme: "plain",
       styles: { fontSize: 10, cellPadding: 1.8, textColor: [22, 32, 42] },
@@ -2640,11 +2666,13 @@ function CreateUserModal({ dark, accountId, onClose, onCreated }) {
       await cred.user.updateProfile({ displayName: name.trim() });
       await secondaryAuth.signOut();
 
-      await db.collection("users").doc(newUid).set({
-        uid: newUid, name: name.trim(), username: usernameKey, email,
+      const batch = db.batch();
+      batch.set(db.collection("users").doc(newUid), {
+        uid: newUid, name: name.trim(), username: usernameKey, email, active: true,
         role: "user", accountId, permissions, createdAt: firebase.firestore.FieldValue.serverTimestamp(),
       });
-      await db.collection("usernames").doc(usernameKey).set({ email, uid: newUid, accountId });
+      batch.set(db.collection("usernames").doc(usernameKey), { email, uid: newUid, accountId });
+      await batch.commit();
 
       onCreated();
       onClose();
@@ -2690,7 +2718,62 @@ function CreateUserModal({ dark, accountId, onClose, onCreated }) {
   );
 }
 
-function SettingsPage({ dark, currentUser }) {
+function BusinessInfoCard({ dark, currentUser, businessInfo }) {
+  const [name, setName] = useState(businessInfo.name || "");
+  const [address, setAddress] = useState(businessInfo.address || "");
+  const [contact, setContact] = useState(businessInfo.contact || "");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  // Keep the form in sync if the account doc changes elsewhere (e.g. another admin tab).
+  useEffect(() => { setName(businessInfo.name || ""); setAddress(businessInfo.address || ""); setContact(businessInfo.contact || ""); }, [businessInfo.name, businessInfo.address, businessInfo.contact]);
+
+  const border = dark ? COLORS.borderDark : COLORS.borderLight;
+  const txt = dark ? COLORS.textDark : COLORS.textLight;
+  const sub = dark ? COLORS.subDark : COLORS.subLight;
+  const inputStyle = { background: dark ? "#0F1B28" : "#fff", borderColor: border, color: txt };
+
+  async function save(e) {
+    e.preventDefault();
+    setSaving(true); setSaved(false);
+    try {
+      await db.collection("accounts").doc(currentUser.accountId).update({
+        businessName: name.trim(), businessAddress: address.trim(), businessContact: contact.trim(),
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card dark={dark} className="p-4 mb-4">
+      <p className="text-sm font-semibold mb-1" style={{ color: txt, fontFamily: "'Sora', sans-serif" }}>Business Information</p>
+      <p className="text-xs mb-3" style={{ color: sub }}>Appears as the header on every PDF and CSV download — receipts, reports, and statements.</p>
+      <form onSubmit={save} className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div>
+          <label className="text-xs font-medium block mb-1" style={{ color: txt }}>Business Name</label>
+          <input value={name} onChange={(e) => setName(e.target.value)} className="w-full px-3 py-2 rounded-lg border text-sm outline-none" style={inputStyle} />
+        </div>
+        <div>
+          <label className="text-xs font-medium block mb-1" style={{ color: txt }}>Address</label>
+          <input value={address} onChange={(e) => setAddress(e.target.value)} className="w-full px-3 py-2 rounded-lg border text-sm outline-none" style={inputStyle} />
+        </div>
+        <div>
+          <label className="text-xs font-medium block mb-1" style={{ color: txt }}>Contact (phone / email)</label>
+          <input value={contact} onChange={(e) => setContact(e.target.value)} className="w-full px-3 py-2 rounded-lg border text-sm outline-none" style={inputStyle} />
+        </div>
+        <div className="sm:col-span-3 flex items-center gap-3">
+          <Button icon="save" type="submit" dark={dark}>{saving ? "Saving…" : "Save"}</Button>
+          {saved && <span className="text-xs" style={{ color: COLORS.green }}>Saved.</span>}
+        </div>
+      </form>
+    </Card>
+  );
+}
+
+function SettingsPage({ dark, currentUser, businessInfo }) {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -2717,8 +2800,26 @@ function SettingsPage({ dark, currentUser }) {
     setEditingUser(null);
   }
 
+  async function toggleActive(u) {
+    const nextActive = u.active === false; // currently inactive -> activate, else deactivate
+    await db.collection("users").doc(u.uid).update({ active: nextActive });
+    setUsers((prev) => prev.map((x) => x.uid === u.uid ? { ...x, active: nextActive } : x));
+  }
+
+  async function deleteUser(u) {
+    if (!window.confirm(`Delete ${u.name} (@${u.username})? They will no longer be able to log in. This can't be undone.`)) return;
+    const batch = db.batch();
+    batch.delete(db.collection("users").doc(u.uid));
+    batch.delete(db.collection("usernames").doc(u.username));
+    await batch.commit();
+    setUsers((prev) => prev.filter((x) => x.uid !== u.uid));
+    if (editingUser === u.uid) setEditingUser(null);
+  }
+
   return (
     <div>
+      <BusinessInfoCard dark={dark} currentUser={currentUser} businessInfo={businessInfo} />
+
       <div className="flex items-center justify-between mb-4">
         <p className="text-sm" style={{ color: sub }}>Create users for your account and control exactly which sections each one can view or edit. New users log in directly with their username and password — no access code needed.</p>
         <Button icon="person_add" onClick={() => setShowCreate(true)}>Create User</Button>
@@ -2731,17 +2832,31 @@ function SettingsPage({ dark, currentUser }) {
           <p className="text-sm py-6 text-center" style={{ color: sub }}>No users created yet.</p>
         ) : (
           <div className="divide-y" style={{ borderColor: border }}>
-            {users.map((u) => (
+            {users.map((u) => {
+              const isInactive = u.active === false;
+              return (
               <div key={u.uid} className="py-3" style={{ borderTop: `1px solid ${border}` }}>
                 <div className="flex items-center justify-between gap-3 flex-wrap">
                   <div>
-                    <p className="text-sm font-medium" style={{ color: txt }}>{u.name} {u.role === "admin" && <span className="text-xs font-normal" style={{ color: sub }}>(Administrator)</span>}</p>
+                    <p className="text-sm font-medium flex items-center gap-2" style={{ color: txt }}>
+                      {u.name}
+                      {u.role === "admin" && <span className="text-xs font-normal" style={{ color: sub }}>(Administrator)</span>}
+                      {isInactive && <span className="text-[11px] font-medium px-1.5 py-0.5 rounded" style={{ background: dark ? "#3A2432" : "#FDECEC", color: COLORS.red }}>Deactivated</span>}
+                    </p>
                     <p className="text-xs" style={{ color: sub }}>@{u.username}</p>
                   </div>
                   {u.role !== "admin" && (
-                    <button onClick={() => setEditingUser(editingUser === u.uid ? null : u.uid)} className="text-xs font-medium px-3 py-1.5 rounded-lg border" style={{ borderColor: border, color: txt }}>
-                      {editingUser === u.uid ? "Close" : "Edit Access"}
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => setEditingUser(editingUser === u.uid ? null : u.uid)} className="text-xs font-medium px-3 py-1.5 rounded-lg border" style={{ borderColor: border, color: txt }}>
+                        {editingUser === u.uid ? "Close" : "Edit Access"}
+                      </button>
+                      <button onClick={() => toggleActive(u)} className="text-xs font-medium px-3 py-1.5 rounded-lg border" style={{ borderColor: border, color: isInactive ? COLORS.green : COLORS.orange }}>
+                        {isInactive ? "Activate" : "Deactivate"}
+                      </button>
+                      <button onClick={() => deleteUser(u)} className="text-xs font-medium px-3 py-1.5 rounded-lg border" style={{ borderColor: border, color: COLORS.red }}>
+                        Delete
+                      </button>
+                    </div>
                   )}
                 </div>
                 {editingUser === u.uid && (
@@ -2750,7 +2865,8 @@ function SettingsPage({ dark, currentUser }) {
                   </div>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </Card>
@@ -2793,12 +2909,25 @@ function App({ currentUser, onLogout }) {
   const [income, setIncome] = useFirestoreCollection(accountId, "income", incomeSeed);
   const [maintenance, setMaintenance] = useFirestoreCollection(accountId, "maintenance", maintenanceSeed);
 
+  const [businessInfo, setBusinessInfoState] = useState({ name: "", address: "", contact: "" });
+  useEffect(() => {
+    if (!db || !accountId) return;
+    const unsub = db.collection("accounts").doc(accountId).onSnapshot((snap) => {
+      const d = snap.data() || {};
+      const info = { name: d.businessName || "", address: d.businessAddress || "", contact: d.businessContact || "" };
+      setBusinessInfoState(info);
+      setBusinessInfo(info); // keeps the global used by exportPDF/toCSV in sync
+    });
+    return unsub;
+  }, [accountId]);
+
   // Every account effectively has "dashboard"; admins see & edit everything by default.
   const visibleNav = NAV_ITEMS.filter(n => isAdmin || permissions[n.key]?.view);
   const navKeys = visibleNav.map(n => n.key);
   const activePage = (page === "settings" || navKeys.includes(page)) ? page : (navKeys[0] || "dashboard");
   const canEditActive = isAdmin || !!permissions[activePage]?.edit;
   const access = { nav: navKeys, canEdit: canEditActive, canDelete: isAdmin && canEditActive };
+  const sidebarItems = isAdmin ? [...visibleNav, { key: "settings", label: "Settings", icon: "settings" }] : visibleNav;
 
   const bg = dark ? COLORS.bgDark : COLORS.bgLight;
   const txt = dark ? COLORS.textDark : COLORS.textLight;
@@ -2819,7 +2948,7 @@ function App({ currentUser, onLogout }) {
       case "expenses": return <ExpensesPage {...pageProps} />;
       case "maintenance": return <MaintenancePage {...pageProps} />;
       case "reports": return <ReportsPage {...pageProps} />;
-      case "settings": return isAdmin ? <SettingsPage dark={dark} currentUser={currentUser} /> : null;
+      case "settings": return isAdmin ? <SettingsPage dark={dark} currentUser={currentUser} businessInfo={businessInfo} /> : null;
       default: return null;
     }
   }
@@ -2844,7 +2973,7 @@ function App({ currentUser, onLogout }) {
           {sidebarOpen && <span className="font-semibold text-sm text-white truncate" style={{ fontFamily: "'Sora', sans-serif" }}>RentFlow</span>}
         </div>
         <nav className="flex-1 py-3 px-2.5 flex flex-col gap-1 overflow-y-auto">
-          {visibleNav.map((n) => {
+          {sidebarItems.map((n) => {
             const isActive = activePage === n.key;
             return (
               <button key={n.key} onClick={() => setPage(n.key)}
@@ -2870,7 +2999,7 @@ function App({ currentUser, onLogout }) {
               <button onClick={() => setMobileNavOpen(false)}><Icon name="close" size={18} color="#fff" /></button>
             </div>
             <nav className="flex-1 py-3 px-2.5 flex flex-col gap-1">
-              {visibleNav.map((n) => {
+              {sidebarItems.map((n) => {
                 const isActive = activePage === n.key;
                 return (
                   <button key={n.key} onClick={() => { setPage(n.key); setMobileNavOpen(false); }}
@@ -2901,11 +3030,6 @@ function App({ currentUser, onLogout }) {
               <span className="text-xs font-medium" style={{ color: "#fff" }}>{currentUser.name}</span>
               <span className="text-[11px]" style={{ color: "rgba(255,255,255,0.75)" }}>{isAdmin ? "Administrator" : "User"}</span>
             </div>
-            {isAdmin && (
-              <button onClick={() => setPage("settings")} title="Settings" className="p-2 rounded-lg border" style={{ borderColor: "rgba(255,255,255,0.35)", background: activePage === "settings" ? "rgba(255,255,255,0.18)" : "transparent" }}>
-                <Icon name="settings" size={16} style={{ color: "#fff" }} />
-              </button>
-            )}
             <button onClick={() => setDark(!dark)} className="p-2 rounded-lg border" style={{ borderColor: "rgba(255,255,255,0.35)" }}>
               {dark ? <Icon name="light_mode" size={16} style={{ color: "#fff" }} /> : <Icon name="dark_mode" size={16} style={{ color: "#fff" }} />}
             </button>
@@ -2974,7 +3098,7 @@ function AuthLayout({ children }) {
   );
 }
 
-function LoginScreen({ onSwitch }) {
+function LoginScreen({ onSwitch, externalError }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -2997,6 +3121,8 @@ function LoginScreen({ onSwitch }) {
     }
   }
 
+  const shownError = error || externalError;
+
   return (
     <AuthLayout>
       <h2 className="text-lg font-semibold mb-1" style={{ fontFamily: "'Sora', sans-serif", color: COLORS.textLight }}>Log In</h2>
@@ -3010,7 +3136,7 @@ function LoginScreen({ onSwitch }) {
           <label className="text-xs font-medium block mb-1" style={{ color: COLORS.textLight }}>Password</label>
           <RevealableField value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" style={{ borderColor: COLORS.borderLight }} />
         </div>
-        {error && <p className="text-xs" style={{ color: COLORS.red }}>{error}</p>}
+        {shownError && <p className="text-xs" style={{ color: COLORS.red }}>{shownError}</p>}
         <button type="submit" disabled={busy} className="w-full py-2.5 rounded-lg text-sm font-semibold text-white mt-1" style={{ background: COLORS.orange, opacity: busy ? 0.6 : 1 }}>{busy ? "Signing in…" : "Log In"}</button>
       </form>
       <p className="text-xs text-center mt-5" style={{ color: COLORS.subLight }}>
@@ -3048,12 +3174,14 @@ function SignupScreen({ onSwitch }) {
 
       // The person who signs up with the access code becomes the Administrator of a
       // brand-new account; everyone they later create in Settings shares this accountId.
-      await db.collection("accounts").doc(newUid).set({ name: name.trim() + "'s Account", ownerUid: newUid, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
-      await db.collection("users").doc(newUid).set({
+      const batch = db.batch();
+      batch.set(db.collection("accounts").doc(newUid), { name: name.trim() + "'s Account", ownerUid: newUid, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+      batch.set(db.collection("users").doc(newUid), {
         uid: newUid, name: name.trim(), username: usernameKey, email,
         role: "admin", accountId: newUid, permissions: blankPermissions(true), createdAt: firebase.firestore.FieldValue.serverTimestamp(),
       });
-      await db.collection("usernames").doc(usernameKey).set({ email, uid: newUid, accountId: newUid });
+      batch.set(db.collection("usernames").doc(usernameKey), { email, uid: newUid, accountId: newUid });
+      await batch.commit();
       // onAuthStateChanged in RootApp takes it from here.
     } catch (err) {
       setError(err.code === "auth/email-already-in-use" ? "That username is already taken." : (err.message || "Could not create account."));
@@ -3108,17 +3236,27 @@ function RootApp() {
   const [authUser, setAuthUser] = useState(undefined); // undefined = loading, null = signed out
   const [profile, setProfile] = useState(null);
   const [screen, setScreen] = useState("login");
+  const [blockedMessage, setBlockedMessage] = useState("");
 
   useEffect(() => {
     if (!auth) { setAuthUser(null); return; }
     const unsub = auth.onAuthStateChanged(async (u) => {
       if (!u) { setAuthUser(null); setProfile(null); return; }
-      setAuthUser(u);
       try {
         const doc = await db.collection("users").doc(u.uid).get();
-        setProfile(doc.exists ? doc.data() : null);
+        const data = doc.exists ? doc.data() : null;
+        if (data && data.active === false) {
+          // Account was deactivated by an admin — sign them back out immediately.
+          await auth.signOut();
+          setAuthUser(null); setProfile(null);
+          setBlockedMessage("This account has been deactivated. Contact your administrator.");
+          return;
+        }
+        setAuthUser(u);
+        setProfile(data);
       } catch (e) {
         console.error("Failed to load user profile:", e);
+        setAuthUser(u);
         setProfile(null);
       }
     });
@@ -3128,7 +3266,9 @@ function RootApp() {
   if (!window.FIREBASE_CONFIGURED) return <ConfigWarning />;
   if (authUser === undefined) return <div id="loading">Loading RentFlow…</div>;
   if (!authUser) {
-    return screen === "login" ? <LoginScreen onSwitch={() => setScreen("signup")} /> : <SignupScreen onSwitch={() => setScreen("login")} />;
+    return screen === "login"
+      ? <LoginScreen onSwitch={() => { setScreen("signup"); setBlockedMessage(""); }} externalError={blockedMessage} />
+      : <SignupScreen onSwitch={() => { setScreen("login"); setBlockedMessage(""); }} />;
   }
   if (!profile) return <div id="loading">Loading your account…</div>;
 
