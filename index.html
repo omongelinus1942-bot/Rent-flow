@@ -162,6 +162,18 @@ const {
 const SIGNUP_ACCESS_CODE = "Error404";
 const auth = window.FIREBASE_CONFIGURED ? firebase.auth() : null;
 const db = window.FIREBASE_CONFIGURED ? firebase.firestore() : null;
+if (db) {
+  // Offline support: Firestore caches reads locally and queues any writes made
+  // while offline, then automatically syncs them the moment the connection
+  // comes back — no extra code needed at the call sites that read/write data.
+  db.enablePersistence({ synchronizeTabs: true }).catch((err) => {
+    if (err.code === "failed-precondition") {
+      console.warn("Offline persistence could not be enabled (already active in another tab).");
+    } else if (err.code === "unimplemented") {
+      console.warn("Offline persistence isn't supported in this browser.");
+    }
+  });
+}
 // Firebase Auth's email/password provider needs an email — usernames are mapped to a
 // synthetic address under this fake domain so people can sign in with just a username.
 const usernameToEmail = (username) => username.trim().toLowerCase().replace(/[^a-z0-9._-]/g, "") + "@rentflow.local";
@@ -175,6 +187,56 @@ function blankPermissions(everything) {
 
 /* Lightweight icon component backed by the Material Symbols font (loaded in <head>),
    used in place of lucide-react so this file has no bundler/module dependency. */
+/* Tracks browser connectivity so the UI can let people know their changes are
+   being saved locally and will sync automatically once they're back online. */
+function useOnlineStatus() {
+  const [online, setOnline] = useState(typeof navigator === "undefined" ? true : navigator.onLine);
+  useEffect(() => {
+    function goOnline() { setOnline(true); }
+    function goOffline() { setOnline(false); }
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    return () => {
+      window.removeEventListener("online", goOnline);
+      window.removeEventListener("offline", goOffline);
+    };
+  }, []);
+  return online;
+}
+
+function OfflineBanner({ online }) {
+  const [showReconnected, setShowReconnected] = useState(false);
+  const wasOffline = useRef(false);
+
+  useEffect(() => {
+    if (!online) { wasOffline.current = true; return; }
+    if (wasOffline.current) {
+      wasOffline.current = false;
+      setShowReconnected(true);
+      const t = setTimeout(() => setShowReconnected(false), 4000);
+      return () => clearTimeout(t);
+    }
+  }, [online]);
+
+  if (!online) {
+    return (
+      <div className="flex items-center justify-center gap-2 px-4 py-2 text-xs font-medium text-center" style={{ background: "#3A2432", color: "#F2B8A2" }}>
+        <Icon name="cloud_off" size={15} />
+        You're offline — anything you enter now is saved on this device and will sync automatically once you're back online.
+      </div>
+    );
+  }
+  if (showReconnected) {
+    return (
+      <div className="flex items-center justify-center gap-2 px-4 py-2 text-xs font-medium text-center" style={{ background: "#123524", color: "#8FE0B4" }}>
+        <Icon name="cloud_done" size={15} />
+        Back online — syncing your changes…
+      </div>
+    );
+  }
+  return null;
+}
+
 function Icon({ name, size = 16, style = {}, className = "", color }) {
   return (
     <span
@@ -3124,6 +3186,7 @@ function App({ currentUser, onLogout }) {
   const [page, setPage] = useState("dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const online = useOnlineStatus();
 
   const accountId = currentUser.accountId;
   const isAdmin = currentUser.role === "admin";
@@ -3270,6 +3333,8 @@ function App({ currentUser, onLogout }) {
             </div>
           </div>
         </header>
+
+        <OfflineBanner online={online} />
 
         <main className="flex-1 overflow-y-auto p-4 md:p-6">
           {renderPage()}
