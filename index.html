@@ -3596,5 +3596,19 @@ ReactDOM.createRoot(rootEl).render(<RootApp />);
     if (el) el.style.display = "none";
   });
 </script>
+
+<!-- Service worker: precaches the HTML shell + every CDN script/font the app
+     needs to boot, so a reload while offline still loads RentFlow instead of
+     the browser's "can't be reached" page. Requires HTTPS (or localhost) —
+     service workers don't run over plain http:// or file://. -->
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("./sw.js").catch(function (err) {
+        console.warn("Service worker registration failed:", err);
+      });
+    });
+  }
+</script>
 </body>
 </html>
